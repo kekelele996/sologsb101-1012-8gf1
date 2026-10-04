@@ -12,9 +12,12 @@ import type { Instrument } from '@/types/instrument';
 import { judgeCalibration } from '@/types/calibration';
 import type { Calibration } from '@/types/calibration';
 import type { Replace } from '@/types/replace';
+import type { Submission } from '@/types/submission';
+import type { BatchItem, DispatchBatch } from '@/types/dispatch';
+import { sliceLegacyBatches as computeLegacySlices } from '@/utils/reconcile';
 
 /** 当前数据结构版本号：每次调整字段结构必须 +1 并补迁移 */
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 
 /** 数据库名（浏览器 IndexedDB 中的库名） */
 export const DB_NAME = 'gbseisarray';
@@ -36,6 +39,9 @@ export interface BackupPayload {
   instruments: Instrument[];
   calibrations: Calibration[];
   replaces: Replace[];
+  submissions: Submission[];
+  dispatchBatches: DispatchBatch[];
+  batchItems: BatchItem[];
 }
 
 export class SeisArrayDatabase extends Dexie {
@@ -44,6 +50,9 @@ export class SeisArrayDatabase extends Dexie {
   instruments!: Table<Instrument, string>;
   calibrations!: Table<Calibration, string>;
   replaces!: Table<Replace, string>;
+  submissions!: Table<Submission, string>;
+  dispatchBatches!: Table<DispatchBatch, string>;
+  batchItems!: Table<BatchItem, string>;
 
   constructor() {
     super(DB_NAME);
@@ -58,7 +67,7 @@ export class SeisArrayDatabase extends Dexie {
     });
 
     // v2：补齐筛选与统计需要的索引（孔径/布设日期、经纬度/基岩、类型/序列号、灵敏度/结论、原因）
-    this.version(DB_VERSION)
+    this.version(2)
       .stores({
         arrays: 'id, name, state, apertureKm, deployDate, department, updatedAt',
         stations: 'id, arrayId, code, lat, lng, elevM, bedrock, updatedAt',
@@ -87,6 +96,20 @@ export class SeisArrayDatabase extends Dexie {
             });
         }
       });
+
+    // v3：运维班送检登记 + 计量站出车批次 / 逐台结论（两份分开，按台站码+序列号对账）
+    this.version(DB_VERSION).stores({
+      arrays: 'id, name, state, apertureKm, deployDate, department, updatedAt',
+      stations: 'id, arrayId, code, lat, lng, elevM, bedrock, updatedAt',
+      instruments: 'id, stationId, type, model, serialNo, installDate, state, updatedAt',
+      calibrations: 'id, instrumentId, date, sensitivity, selfNoise, responseVerdict, updatedAt',
+      replaces: 'id, instrumentId, state, date, newSerialNo, updatedAt',
+      submissions:
+        'id, instrumentId, stationId, stationCode, serialNo, status, batchId, submittedDate, updatedAt',
+      dispatchBatches: 'id, batchNo, dispatchDate, status, agency, updatedAt',
+      batchItems:
+        'id, batchId, stationCode, serialNo, reconStatus, calibrationId, instrumentId, updatedAt',
+    });
   }
 }
 
@@ -541,21 +564,63 @@ export async function seedDemoData(): Promise<void> {
   );
 }
 
-/** 打开数据库并幂等播种：仅当台阵表为空时灌入演示数据 */
+/** 打开数据库并幂等播种：仅当台阵表为空时灌入演示数据；随后把旧标定按日期+机构切出车批次 */
 export async function initDatabase(): Promise<void> {
   await db.open();
   const count = await db.arrays.count();
   if (count === 0) {
     await seedDemoData();
   }
+  await sliceLegacyBatches();
   stampDbVersion();
+}
+
+/**
+ * 旧标定切批次（幂等）：把还没挂到批次明细上的标定，按 标定日期 + 机构 切出车批次并挂回台站；
+ * 切不出来的（缺日期 / 缺机构 / 找不到仪器台站）保持原样，列入孤儿清单单独展示。
+ * 升级后首次打开与演示数据播种后都会执行；已挂接的标定不会重复切。
+ */
+export async function sliceLegacyBatches(): Promise<{ slicedBatches: number; slicedItems: number; orphans: number }> {
+  const [calibrations, instruments, stations, items] = await Promise.all([
+    db.calibrations.toArray(),
+    db.instruments.toArray(),
+    db.stations.toArray(),
+    db.batchItems.toArray(),
+  ]);
+  const linkedIds = new Set(
+    items.map((row) => row.calibrationId).filter((id): id is string => typeof id === 'string' && id.length > 0)
+  );
+  const unlinked = calibrations.filter((row) => !linkedIds.has(row.id));
+  if (unlinked.length === 0) return { slicedBatches: 0, slicedItems: 0, orphans: 0 };
+
+  const result = computeLegacySlices(unlinked, instruments, stations);
+  if (result.batches.length > 0 || result.items.length > 0) {
+    await db.transaction('rw', [db.dispatchBatches, db.batchItems], async () => {
+      if (result.batches.length > 0) await db.dispatchBatches.bulkPut(result.batches);
+      if (result.items.length > 0) await db.batchItems.bulkPut(result.items);
+    });
+  }
+  return {
+    slicedBatches: result.batches.length,
+    slicedItems: result.items.length,
+    orphans: result.orphans.length,
+  };
 }
 
 /** 清空全部业务表（导入覆盖与重置共用） */
 export async function clearAllTables(): Promise<void> {
   await db.transaction(
     'rw',
-    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces],
+    [
+      db.arrays,
+      db.stations,
+      db.instruments,
+      db.calibrations,
+      db.replaces,
+      db.submissions,
+      db.dispatchBatches,
+      db.batchItems,
+    ],
     async () => {
       await Promise.all([
         db.arrays.clear(),
@@ -563,6 +628,9 @@ export async function clearAllTables(): Promise<void> {
         db.instruments.clear(),
         db.calibrations.clear(),
         db.replaces.clear(),
+        db.submissions.clear(),
+        db.dispatchBatches.clear(),
+        db.batchItems.clear(),
       ]);
     }
   );
@@ -576,14 +644,35 @@ export async function resetDatabase(): Promise<void> {
 
 /** 统计各表行数，供页脚概览与几何页展示 */
 export async function countAll(): Promise<Record<string, number>> {
-  const [arrays, stations, instruments, calibrations, replaces] = await Promise.all([
+  const [
+    arrays,
+    stations,
+    instruments,
+    calibrations,
+    replaces,
+    submissions,
+    dispatchBatches,
+    batchItems,
+  ] = await Promise.all([
     db.arrays.count(),
     db.stations.count(),
     db.instruments.count(),
     db.calibrations.count(),
     db.replaces.count(),
+    db.submissions.count(),
+    db.dispatchBatches.count(),
+    db.batchItems.count(),
   ]);
-  return { arrays, stations, instruments, calibrations, replaces };
+  return {
+    arrays,
+    stations,
+    instruments,
+    calibrations,
+    replaces,
+    submissions,
+    dispatchBatches,
+    batchItems,
+  };
 }
 
 /** 写入结构版本号到 localStorage，便于几何页比对 */

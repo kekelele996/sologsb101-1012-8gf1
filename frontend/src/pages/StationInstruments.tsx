@@ -59,6 +59,11 @@ import {
   updateInstrument,
 } from '@/stores/instrumentSlice';
 import { selectCalibrations, selectReplaces } from '@/stores/calibrationSlice';
+import {
+  createSubmission,
+  selectSubmissions,
+} from '@/stores/submissionSlice';
+import { selectBatches } from '@/stores/dispatchSlice';
 import { BEDROCK_TYPES, validateLatLng, type BedrockType, type SeisStation } from '@/types/station';
 import {
   COMMON_MODELS,
@@ -115,6 +120,8 @@ export default function StationInstruments() {
   const allInstruments = useAppSelector(selectInstruments);
   const calibrations = useAppSelector(selectCalibrations);
   const replaces = useAppSelector(selectReplaces);
+  const submissions = useAppSelector(selectSubmissions);
+  const batches = useAppSelector(selectBatches);
 
   const [stationModalOpen, setStationModalOpen] = useState(false);
   const [editingStationId, setEditingStationId] = useState<string | null>(null);
@@ -124,6 +131,27 @@ export default function StationInstruments() {
   const [submitting, setSubmitting] = useState(false);
   const [stationForm] = Form.useForm<StationFormValues>();
   const [instrumentForm] = Form.useForm<InstrumentFormValues>();
+  const [submissionModalOpen, setSubmissionModalOpen] = useState(false);
+  const [submittingInstrument, setSubmittingInstrument] = useState<Instrument | null>(null);
+  const [submissionDate, setSubmissionDate] = useState(dayjs());
+  const [submissionRemark, setSubmissionRemark] = useState('');
+
+  /** 仪器 → 最近一条未闭环送检登记 */
+  const submissionMap = useMemo(() => {
+    const map = new Map<string, (typeof submissions)[number]>();
+    submissions.forEach((row) => {
+      if (row.status === '已对账' || row.status === '已退回') return;
+      const existing = map.get(row.instrumentId);
+      if (!existing || row.createdAt > existing.createdAt) map.set(row.instrumentId, row);
+    });
+    return map;
+  }, [submissions]);
+
+  const batchNoMap = useMemo(() => {
+    const map = new Map<string, string>();
+    batches.forEach((batch) => map.set(batch.id, batch.batchNo));
+    return map;
+  }, [batches]);
 
   useEffect(() => {
     if (arrays.length === 0) void initDatabase();
@@ -333,6 +361,33 @@ export default function StationInstruments() {
     }
   };
 
+  const openSubmission = (instrument: Instrument) => {
+    setSubmittingInstrument(instrument);
+    setSubmissionDate(dayjs());
+    setSubmissionRemark('');
+    setSubmissionModalOpen(true);
+  };
+
+  const submitSubmission = async () => {
+    if (!submittingInstrument) return;
+    setSubmitting(true);
+    try {
+      const result = await dispatch(
+        createSubmission({
+          instrumentId: submittingInstrument.id,
+          submittedDate: submissionDate.format('YYYY-MM-DD'),
+          remark: submissionRemark,
+        })
+      ).unwrap();
+      message.success(result.assigned ? '已登记送检并派入筹备中批次' : '已登记送检，批次名额已满，排队等下一趟');
+      setSubmissionModalOpen(false);
+    } catch (error) {
+      message.error(typeof error === 'string' ? error : '送检登记失败');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const handleBulkPending = async () => {
     const ids = Array.from(new Set(allInstruments.map((instrument) => instrument.id)));
     const targetIds = ids.filter((id) =>
@@ -420,6 +475,18 @@ export default function StationInstruments() {
           value={totals.overdue}
           suffix="台"
           tone={totals.overdue > 0 ? 'warning' : 'success'}
+        />
+        <StatBadge
+          label="送检中"
+          value={submissions.filter((s) => s.status !== '已对账' && s.status !== '已退回').length}
+          suffix="台"
+          tone="info"
+        />
+        <StatBadge
+          label="对账失败"
+          value={submissions.filter((s) => s.status === '对账失败').length}
+          suffix="台"
+          tone={submissions.some((s) => s.status === '对账失败') ? 'danger' : 'success'}
         />
       </div>
 
@@ -606,6 +673,32 @@ export default function StationInstruments() {
                   ),
                 },
                 {
+                  title: '送检状态',
+                  width: 170,
+                  render: (_: unknown, instrument: Instrument) => {
+                    const sub = submissionMap.get(instrument.id);
+                    if (!sub) return <span className="gb-hint">未送检</span>;
+                    const color =
+                      sub.status === '已对账'
+                        ? 'green'
+                        : sub.status === '对账失败'
+                          ? 'red'
+                          : sub.status === '已退回'
+                            ? 'default'
+                            : 'blue';
+                    return (
+                      <div>
+                        <Tag color={color}>{sub.status}</Tag>
+                        {sub.batchId ? (
+                          <div className="gb-hint gb-mono">{batchNoMap.get(sub.batchId) ?? sub.batchId}</div>
+                        ) : sub.status === '待安排' ? (
+                          <div className="gb-hint">排队等下一趟</div>
+                        ) : null}
+                      </div>
+                    );
+                  },
+                },
+                {
                   title: '标定次数',
                   width: 100,
                   align: 'right',
@@ -653,12 +746,23 @@ export default function StationInstruments() {
                 },
                 {
                   title: '操作',
-                  width: 190,
-                  render: (_: unknown, instrument: Instrument) => (
-                    <Space size={6}>
-                      <Button size="small" onClick={() => openInstrumentEdit(activeStation, instrument)}>
-                        编辑
-                      </Button>
+                  width: 250,
+                  render: (_: unknown, instrument: Instrument) => {
+                    const sub = submissionMap.get(instrument.id);
+                    return (
+                      <Space size={6}>
+                        <Button
+                          size="small"
+                          type="primary"
+                          ghost
+                          disabled={!!sub}
+                          onClick={() => openSubmission(instrument)}
+                        >
+                          {sub ? '已送检' : '送检登记'}
+                        </Button>
+                        <Button size="small" onClick={() => openInstrumentEdit(activeStation, instrument)}>
+                          编辑
+                        </Button>
                       <Popconfirm
                         title="删除仪器"
                         description={`将同时删除其标定与更换记录，确认删除「${instrument.model}」？`}
@@ -676,13 +780,14 @@ export default function StationInstruments() {
                         </Button>
                       </Popconfirm>
                     </Space>
-                  ),
+                  );
                 },
-              ]}
-            />
-          )}
-        </Card>
-      ) : (
+              },
+            ]}
+          />
+        )}
+      </Card>
+    ) : (
         <Card className="gb-panel" size="small">
           <EmptyPanel
             title="请选择台站查看仪器"
@@ -785,6 +890,39 @@ export default function StationInstruments() {
             <Input.TextArea rows={2} maxLength={80} placeholder="如：井下安装，深度 42 m" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        open={submissionModalOpen}
+        title={`送检登记 · ${submittingInstrument?.stationId ? activeStation?.code ?? '' : ''} ${submittingInstrument?.model ?? ''}`}
+        onCancel={() => setSubmissionModalOpen(false)}
+        onOk={() => void submitSubmission()}
+        confirmLoading={submitting}
+        okText="提交送检"
+        destroyOnClose
+      >
+        {submittingInstrument ? (
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <div>
+              仪器 <b>{submittingInstrument.model}</b>（序列号 <span className="gb-mono">{submittingInstrument.serialNo}</span>）
+              将按「台站码 + 序列号」与计量站逐台结论对账。
+            </div>
+            <div className="gb-hint">
+              提交后立即按 FIFO 派入筹备中的出车批次；名额满了排队等下一趟，已出车的批次不动。
+            </div>
+            <Space>
+              <span>送检日期</span>
+              <DatePicker value={submissionDate} onChange={(d) => d && setSubmissionDate(d)} />
+            </Space>
+            <Input.TextArea
+              rows={2}
+              maxLength={80}
+              placeholder="备注（选填）"
+              value={submissionRemark}
+              onChange={(e) => setSubmissionRemark(e.target.value)}
+            />
+          </Space>
+        ) : null}
       </Modal>
     </div>
   );

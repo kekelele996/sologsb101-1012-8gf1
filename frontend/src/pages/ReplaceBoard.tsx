@@ -535,9 +535,9 @@ export default function ReplaceBoard() {
         更换完成后点击「→ 已更换」，系统会把新序列号回写到仪器档案并置为在用；再流转到「已复核」即完成闭环。
         前往
         <Button type="link" size="small" onClick={() => navigate(ROUTES.calibrations)}>
-          标定记录台
+          出车批次与对账
         </Button>
-        可查看历次灵敏度趋势。
+        可查看已对账结论与历次灵敏度趋势。
       </p>
 
       <Modal

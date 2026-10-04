@@ -30,6 +30,8 @@ import {
   selectReplaces,
   startCalibrationSubscription,
 } from '@/stores/calibrationSlice';
+import { selectSubmissions, startSubmissionSubscription } from '@/stores/submissionSlice';
+import { selectBatches, startDispatchSubscription } from '@/stores/dispatchSlice';
 import { DB_NAME, DB_VERSION, initDatabase } from '@/utils/db';
 
 const { Header, Sider, Content, Footer } = Layout;
@@ -54,6 +56,8 @@ export default function App() {
   const instruments = useAppSelector(selectInstruments);
   const calibrations = useAppSelector(selectCalibrations);
   const replaces = useAppSelector(selectReplaces);
+  const submissions = useAppSelector(selectSubmissions);
+  const batches = useAppSelector(selectBatches);
   const currentArrayId = useAppSelector(selectCurrentArrayId);
   const ready = useAppSelector((state) => state.array.ready);
 
@@ -67,6 +71,8 @@ export default function App() {
         startArraySubscription(dispatch);
         startInstrumentSubscription(dispatch);
         startCalibrationSubscription(dispatch);
+        startSubmissionSubscription(dispatch);
+        startDispatchSubscription(dispatch);
       } catch (error) {
         if (cancelled) return;
         messageApi.error(
@@ -116,7 +122,7 @@ export default function App() {
                 label: currentArray ? `台站仪器 · ${currentArray.name}` : '台站仪器（先选台阵）',
                 disabled: !currentArrayId,
               },
-              { key: ROUTES.calibrations, icon: <DashboardOutlined />, label: '标定记录台' },
+              { key: ROUTES.calibrations, icon: <DashboardOutlined />, label: '出车批次与对账' },
               { key: ROUTES.replacements, icon: <SwapOutlined />, label: '合格评定与更换' },
               { key: ROUTES.geometry, icon: <GlobalOutlined />, label: '台阵几何与备份' },
             ]}
@@ -130,7 +136,10 @@ export default function App() {
                 <ExperimentOutlined /> 仪器 {instruments.length}
               </span>
               <span>
-                <ThunderboltOutlined /> 标定 {calibrations.length} · 不合格 {unqualified}
+                <ThunderboltOutlined /> 送检 {submissions.length} · 批次 {batches.length}
+              </span>
+              <span>
+                <DashboardOutlined /> 标定 {calibrations.length} · 不合格 {unqualified}
               </span>
               <span>
                 <SwapOutlined /> 更换未闭环 {pendingReplaces}

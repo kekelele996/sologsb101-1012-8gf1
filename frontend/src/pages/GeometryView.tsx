@@ -52,7 +52,16 @@ import {
 } from '@/utils/export';
 import { bearingDeg, round, stationDistances, toLocalPlane, planeViewBox } from '@/utils/geo';
 
-const EMPTY_COUNTS: CountMap = { arrays: 0, stations: 0, instruments: 0, calibrations: 0, replaces: 0 };
+const EMPTY_COUNTS: CountMap = {
+  arrays: 0,
+  stations: 0,
+  instruments: 0,
+  calibrations: 0,
+  replaces: 0,
+  submissions: 0,
+  dispatchBatches: 0,
+  batchItems: 0,
+};
 
 export default function GeometryView() {
   const { message } = AntdApp.useApp();
@@ -106,6 +115,9 @@ export default function GeometryView() {
       instruments,
       calibrations,
       replaces,
+      submissions: [],
+      dispatchBatches: [],
+      batchItems: [],
     };
     return buildArraySummaries(payload);
   }, [arrays, calibrations, instruments, replaces, stations]);
@@ -282,6 +294,9 @@ export default function GeometryView() {
         <StatBadge label="台阵" value={counts.arrays} suffix="个" tone="primary" />
         <StatBadge label="台站" value={counts.stations} suffix="个" tone="info" />
         <StatBadge label="仪器" value={counts.instruments} suffix="台" tone="default" />
+        <StatBadge label="送检登记" value={counts.submissions} suffix="条" tone="warning" />
+        <StatBadge label="出车批次" value={counts.dispatchBatches} suffix="个" tone="primary" />
+        <StatBadge label="逐台明细" value={counts.batchItems} suffix="条" tone="info" />
         <StatBadge label="标定记录" value={counts.calibrations} suffix="次" tone="success" />
         <StatBadge label="更换记录" value={counts.replaces} suffix="条" tone="warning" />
       </div>
@@ -504,6 +519,9 @@ export default function GeometryView() {
             <Descriptions.Item label="浏览器记录版本">v{stampedVersion}</Descriptions.Item>
             <Descriptions.Item label="台阵 / 台站">{counts.arrays} / {counts.stations}</Descriptions.Item>
             <Descriptions.Item label="仪器 / 标定">{counts.instruments} / {counts.calibrations}</Descriptions.Item>
+            <Descriptions.Item label="送检 / 批次 / 明细">
+              {counts.submissions} / {counts.dispatchBatches} / {counts.batchItems}
+            </Descriptions.Item>
             <Descriptions.Item label="更换记录">{counts.replaces}</Descriptions.Item>
             <Descriptions.Item label="最近备份时间" span={3}>
               {lastBackupAt ? new Date(lastBackupAt).toLocaleString('zh-CN') : '尚未备份'}
@@ -511,7 +529,8 @@ export default function GeometryView() {
           </Descriptions>
           <p className="gb-hint">
             数据仅保存在当前浏览器 IndexedDB（{DB_NAME}）中，换浏览器或清空站点数据后不会自动跟随，请通过 JSON
-            备份迁移。导出内容包含 arrays / stations / instruments / calibrations / replaces 五张表。
+            备份迁移。导出内容包含 arrays / stations / instruments / calibrations / replaces / submissions /
+            dispatchBatches / batchItems 八张表。
           </p>
         </Space>
       </Card>
