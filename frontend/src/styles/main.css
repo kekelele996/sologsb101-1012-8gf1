@@ -1,0 +1,133 @@
+/* 地震台阵仪器标定与布设台账 · 全局样式
+   深蓝台网底 + 波形暖色点缀，数字统一等宽显示，便于比对读数。 */
+
+:root {
+  --gb-paper: #f2f5f9;
+  --gb-panel: #ffffff;
+  --gb-ink: #16232e;
+  --gb-blue: #1e3a5f;
+  --gb-blue-light: #3f7bbf;
+  --gb-aqua: #7fd1e8;
+  --gb-sun: #ffd166;
+  --gb-green: #1e8449;
+  --gb-line: #dbe4ee;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--gb-paper);
+  color: var(--gb-ink);
+  font-family: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 波形与网格底纹 */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.45;
+  background-image:
+    radial-gradient(circle at 10% 8%, rgba(63, 123, 191, 0.14), transparent 42%),
+    radial-gradient(circle at 92% 6%, rgba(30, 58, 95, 0.1), transparent 38%),
+    repeating-linear-gradient(0deg, rgba(30, 58, 95, 0.03) 0 1px, transparent 1px 22px);
+}
+
+#root {
+  position: relative;
+  z-index: 1;
+}
+
+.gb-panel {
+  background: var(--gb-panel);
+  border: 1px solid var(--gb-line);
+  border-radius: 10px;
+  padding: 16px;
+  box-shadow: 0 2px 10px rgba(30, 58, 95, 0.06);
+}
+
+.gb-panel + .gb-panel {
+  margin-top: 16px;
+}
+
+.gb-panel-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.gb-panel-title h2,
+.gb-panel-title h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--gb-blue);
+}
+
+.gb-brand-bar {
+  height: 4px;
+  border-radius: 4px;
+  margin-bottom: 14px;
+  background: linear-gradient(90deg, var(--gb-blue), var(--gb-aqua) 55%, var(--gb-sun));
+}
+
+.gb-mono {
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.gb-stats-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.gb-hint {
+  font-size: 12px;
+  color: #8194a2;
+  line-height: 1.75;
+}
+
+.gb-danger {
+  color: #c0392b;
+  font-weight: 600;
+}
+
+.gb-table-compact .ant-table-cell {
+  padding: 8px 8px !important;
+}
+
+/* 灵敏度趋势图容器 */
+.gb-chart {
+  width: 100%;
+  height: 240px;
+  background: linear-gradient(180deg, #ffffff, #f5f8fc);
+  border: 1px solid var(--gb-line);
+  border-radius: 10px;
+}
+
+.gb-chart-axis {
+  font-size: 11px;
+  fill: #8194a2;
+}
+
+@media (max-width: 900px) {
+  .gb-panel {
+    padding: 12px;
+  }
+}
