@@ -7,12 +7,14 @@ import { useDispatch, useSelector, type TypedUseSelectorHook } from 'react-redux
 import arrayReducer from '@/stores/arraySlice';
 import instrumentReducer from '@/stores/instrumentSlice';
 import calibrationReducer from '@/stores/calibrationSlice';
+import ledgerReducer from '@/stores/ledgerSlice';
 
 export const store = configureStore({
   reducer: {
     array: arrayReducer,
     instrument: instrumentReducer,
     calibration: calibrationReducer,
+    ledger: ledgerReducer,
   },
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({

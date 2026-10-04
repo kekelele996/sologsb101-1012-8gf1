@@ -12,9 +12,12 @@ import type { Instrument } from '@/types/instrument';
 import { judgeCalibration } from '@/types/calibration';
 import type { Calibration } from '@/types/calibration';
 import type { Replace } from '@/types/replace';
+import type { Dispatch } from '@/types/dispatch';
+import type { CalibBatch } from '@/types/batch';
+import { cutLegacyCalibrations } from '@/utils/reconcile';
 
 /** 当前数据结构版本号：每次调整字段结构必须 +1 并补迁移 */
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 
 /** 数据库名（浏览器 IndexedDB 中的库名） */
 export const DB_NAME = 'gbseisarray';
@@ -24,6 +27,8 @@ export const LS_KEYS = {
   dbVersion: 'gbseisarray:db-version',
   lastBackupAt: 'gbseisarray:last-backup-at',
   lastArrayId: 'gbseisarray:last-array-id',
+  /** v3 升级时切不出来的旧标定（单列等人工确认） */
+  orphanCalibrations: 'gbseisarray:v3-orphan-calibrations',
 } as const;
 
 /** 备份文件结构，供 utils/export.ts 与几何页使用 */
@@ -36,6 +41,8 @@ export interface BackupPayload {
   instruments: Instrument[];
   calibrations: Calibration[];
   replaces: Replace[];
+  dispatches: Dispatch[];
+  batches: CalibBatch[];
 }
 
 export class SeisArrayDatabase extends Dexie {
@@ -44,6 +51,10 @@ export class SeisArrayDatabase extends Dexie {
   instruments!: Table<Instrument, string>;
   calibrations!: Table<Calibration, string>;
   replaces!: Table<Replace, string>;
+  /** 运维班：送检登记 */
+  dispatches!: Table<Dispatch, string>;
+  /** 计量站：出车批次（含逐台结论） */
+  batches!: Table<CalibBatch, string>;
 
   constructor() {
     super(DB_NAME);
@@ -58,6 +69,16 @@ export class SeisArrayDatabase extends Dexie {
     });
 
     // v2：补齐筛选与统计需要的索引（孔径/布设日期、经纬度/基岩、类型/序列号、灵敏度/结论、原因）
+    this.version(2).stores({
+      arrays: 'id, name, state, apertureKm, deployDate, department, updatedAt',
+      stations: 'id, arrayId, code, lat, lng, elevM, bedrock, updatedAt',
+      instruments: 'id, stationId, type, model, serialNo, installDate, state, updatedAt',
+      calibrations: 'id, instrumentId, date, sensitivity, selfNoise, responseVerdict, updatedAt',
+      replaces: 'id, instrumentId, state, date, newSerialNo, updatedAt',
+    });
+
+    // v3：运维班送检登记 / 计量站出车批次两侧分账
+    // 旧标定没有出车批次，按「标定日期 + 机构」切出历史批次挂回台站，切不出来的单列
     this.version(DB_VERSION)
       .stores({
         arrays: 'id, name, state, apertureKm, deployDate, department, updatedAt',
@@ -65,9 +86,12 @@ export class SeisArrayDatabase extends Dexie {
         instruments: 'id, stationId, type, model, serialNo, installDate, state, updatedAt',
         calibrations: 'id, instrumentId, date, sensitivity, selfNoise, responseVerdict, updatedAt',
         replaces: 'id, instrumentId, state, date, newSerialNo, updatedAt',
+        dispatches:
+          'id, instrumentId, stationId, stationCode, serialNo, state, batchId, calibrationId, sendDate, updatedAt',
+        batches: 'id, code, state, departDate, agency, updatedAt',
       })
       .upgrade(async (tx) => {
-        // 迁移：历史数据补齐时间戳与必填字段，避免列表排序与筛选拿到 undefined
+        // v2 → v3：历史数据缺字段时补齐（只补缺，绝不覆盖已有的 agency / 结论等台账值）
         const defaults: Array<[string, () => Record<string, unknown>]> = [
           ['arrays', () => ({ apertureKm: 0, stationCount: 0, department: '' })],
           ['stations', () => ({ lat: 0, lng: 0, elevM: 0, bedrock: '花岗岩', siteNote: '' })],
@@ -83,8 +107,33 @@ export class SeisArrayDatabase extends Dexie {
               const now = Date.now();
               if (typeof row.createdAt !== 'number') row.createdAt = now;
               if (typeof row.updatedAt !== 'number') row.updatedAt = row.createdAt;
-              Object.assign(row, factory());
+              const filled = factory();
+              Object.keys(filled).forEach((key) => {
+                if (row[key] === undefined) row[key] = filled[key];
+              });
             });
+        }
+
+        // 旧标定按标定日期 + 机构切批次挂回台站
+        const [calibrations, instruments, stations] = await Promise.all([
+          tx.table<Calibration, string>('calibrations').toArray(),
+          tx.table<Instrument, string>('instruments').toArray(),
+          tx.table<SeisStation, string>('stations').toArray(),
+        ]);
+        const cut = cutLegacyCalibrations(calibrations, instruments, stations);
+        if (cut.batches.length > 0) {
+          await tx.table('batches').bulkAdd(cut.batches);
+        }
+        if (cut.dispatches.length > 0) {
+          await tx.table('dispatches').bulkAdd(cut.dispatches);
+        }
+        // 切不出来的旧标定单列（不丢弃），写 localStorage 供页面提示人工确认
+        if (cut.orphans.length > 0) {
+          try {
+            localStorage.setItem(LS_KEYS.orphanCalibrations, JSON.stringify(cut.orphans));
+          } catch {
+            // localStorage 不可用时忽略，原始标定记录仍在 calibrations 表中
+          }
         }
       });
   }
@@ -490,7 +539,7 @@ export async function seedDemoData(): Promise<void> {
 
   await db.transaction(
     'rw',
-    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces],
+    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces, db.dispatches, db.batches],
     async () => {
       const stamp = (offset: number): { createdAt: number; updatedAt: number } => ({
         createdAt: now + offset,
@@ -532,11 +581,291 @@ export async function seedDemoData(): Promise<void> {
         });
       });
 
+      // 旧标定按「标定日期 + 机构」切出历史出车批次并挂回台站（与升级迁移同一套规则）
+      const legacy = cutLegacyCalibrations(calibrationRows, instrumentRows, stationRows);
+
+      // 当前业务演示：一趟已出车（3 台已录结论 / 1 台退回 / 1 台对账失败），一趟待出车（名额将满，后面排队）
+      const activeBatchRows: CalibBatch[] = [
+        {
+          id: 'bt_2026_03',
+          code: 'JL2026-03',
+          departDate: daysAgo(3),
+          capacity: 4,
+          agency: '省地震局计量站',
+          state: '已出车',
+          remark: '龙门峡方向第三趟，已返回',
+          items: [
+            {
+              dispatchId: 'dsp_ltx03_bb',
+              instrumentId: 'ins_ltx03_bb',
+              stationCode: 'LTX03',
+              serialNo: 'STS25-20230902-11',
+              sensitivity: 2198.6,
+              selfNoise: 1.98,
+              verdict: '合格',
+              returned: false,
+              note: '脉冲响应合格，灵敏度年变化 -2.3%',
+              createdAt: now - 3 * 86400000,
+              updatedAt: now - 1 * 86400000,
+            },
+            {
+              dispatchId: 'dsp_ltx02_bb',
+              instrumentId: 'ins_ltx02_bb',
+              stationCode: 'LTX02',
+              serialNo: 'T120-20220315-07',
+              sensitivity: 1012.3,
+              selfNoise: 2.95,
+              verdict: '不合格',
+              returned: false,
+              note: '灵敏度跌至区间下限附近，判不合格',
+              createdAt: now - 3 * 86400000,
+              updatedAt: now - 1 * 86400000,
+            },
+            {
+              dispatchId: 'dsp_ltx01_st',
+              instrumentId: 'ins_ltx01_st',
+              stationCode: 'LTX01',
+              serialNo: 'FSS3B-20210418-02',
+              sensitivity: null,
+              selfNoise: null,
+              verdict: '待判定',
+              returned: false,
+              note: '报告尚未整理，先挂结论',
+              createdAt: now - 3 * 86400000,
+              updatedAt: now - 2 * 86400000,
+            },
+            {
+              dispatchId: 'dsp_hx02_bb',
+              instrumentId: 'ins_hx02_bb',
+              stationCode: 'HX02',
+              serialNo: 'HX02-WRONG-99',
+              sensitivity: null,
+              selfNoise: null,
+              verdict: '待判定',
+              returned: true,
+              note: '现场登记序列号与运维班台账对不上，且仪器外观受损，随车退回',
+              createdAt: now - 3 * 86400000,
+              updatedAt: now - 1 * 86400000,
+            },
+          ],
+          createdAt: now - 6 * 86400000,
+          updatedAt: now - 1 * 86400000,
+        },
+        {
+          id: 'bt_2026_04',
+          code: 'JL2026-04',
+          departDate: '2026-10-14',
+          capacity: 2,
+          agency: '省地震局计量站',
+          state: '待出车',
+          remark: '下一趟，名额 2，已满',
+          items: [
+            {
+              dispatchId: 'dsp_hx01_bb',
+              instrumentId: 'ins_hx01_bb',
+              stationCode: 'HX01',
+              serialNo: 'TC-20190925-03',
+              sensitivity: null,
+              selfNoise: null,
+              verdict: '待判定',
+              returned: false,
+              note: '',
+              createdAt: now - 1 * 86400000,
+              updatedAt: now - 1 * 86400000,
+            },
+            {
+              dispatchId: 'dsp_hx01_sm',
+              instrumentId: 'ins_hx01_sm',
+              stationCode: 'HX01',
+              serialNo: 'EST-20190925-04',
+              sensitivity: null,
+              selfNoise: null,
+              verdict: '待判定',
+              returned: false,
+              note: '',
+              createdAt: now - 1 * 86400000,
+              updatedAt: now - 1 * 86400000,
+            },
+          ],
+          createdAt: now - 2 * 86400000,
+          updatedAt: now - 1 * 86400000,
+        },
+      ];
+
+      const activeDispatchRows: Dispatch[] = [
+        {
+          id: 'dsp_ltx03_bb',
+          instrumentId: 'ins_ltx03_bb',
+          stationId: 'stn_ltx_03',
+          stationCode: 'LTX03',
+          serialNo: 'STS25-20230902-11',
+          sendDate: daysAgo(5),
+          state: '已入库',
+          batchId: 'bt_2026_03',
+          queueOrder: 0,
+          mismatchReason: '',
+          returnReason: '',
+          calibrationId: 'cal_active_ltx03_bb',
+          operator: '周渝',
+          remark: '随车返回后已回装 LTX03',
+          ...stamp(600),
+        },
+        {
+          id: 'dsp_ltx02_bb',
+          instrumentId: 'ins_ltx02_bb',
+          stationId: 'stn_ltx_02',
+          stationCode: 'LTX02',
+          serialNo: 'T120-20220315-07',
+          sendDate: daysAgo(5),
+          state: '已入库',
+          batchId: 'bt_2026_03',
+          queueOrder: 1,
+          mismatchReason: '',
+          returnReason: '',
+          calibrationId: 'cal_active_ltx02_bb',
+          operator: '周渝',
+          remark: '不合格，已转更换提醒',
+          ...stamp(601),
+        },
+        {
+          id: 'dsp_ltx01_st',
+          instrumentId: 'ins_ltx01_st',
+          stationId: 'stn_ltx_01',
+          stationCode: 'LTX01',
+          serialNo: 'FSS3B-20210418-02',
+          sendDate: daysAgo(5),
+          state: '已出车',
+          batchId: 'bt_2026_03',
+          queueOrder: 2,
+          mismatchReason: '',
+          returnReason: '',
+          calibrationId: '',
+          operator: '周渝',
+          remark: '等计量站补结论',
+          ...stamp(602),
+        },
+        {
+          id: 'dsp_hx02_bb',
+          instrumentId: 'ins_hx02_bb',
+          stationId: 'stn_hx_02',
+          stationCode: 'HX02',
+          serialNo: 'CMG-3E-20190926-05',
+          sendDate: daysAgo(5),
+          state: '对账失败',
+          batchId: 'bt_2026_03',
+          queueOrder: 3,
+          mismatchReason: '序列号不一致',
+          returnReason: '序列号对不上且外观受损，计量站仅退回这一台',
+          calibrationId: '',
+          operator: '林之遥',
+          remark: '挂起待确认：以运维班台账为准重试',
+          ...stamp(603),
+        },
+        {
+          id: 'dsp_hx01_bb',
+          instrumentId: 'ins_hx01_bb',
+          stationId: 'stn_hx_01',
+          stationCode: 'HX01',
+          serialNo: 'TC-20190925-03',
+          sendDate: daysAgo(2),
+          state: '已排入',
+          batchId: 'bt_2026_04',
+          queueOrder: 0,
+          mismatchReason: '',
+          returnReason: '',
+          calibrationId: '',
+          operator: '陈立群',
+          remark: '',
+          ...stamp(604),
+        },
+        {
+          id: 'dsp_hx01_sm',
+          instrumentId: 'ins_hx01_sm',
+          stationId: 'stn_hx_01',
+          stationCode: 'HX01',
+          serialNo: 'EST-20190925-04',
+          sendDate: daysAgo(2),
+          state: '已排入',
+          batchId: 'bt_2026_04',
+          queueOrder: 1,
+          mismatchReason: '',
+          returnReason: '',
+          calibrationId: '',
+          operator: '陈立群',
+          remark: '',
+          ...stamp(605),
+        },
+        {
+          id: 'dsp_ltx02_st_q',
+          instrumentId: 'ins_ltx02_st',
+          stationId: 'stn_ltx_02',
+          stationCode: 'LTX02',
+          serialNo: 'L4C-20220315-08',
+          sendDate: daysAgo(1),
+          state: '排队中',
+          batchId: '',
+          queueOrder: 0,
+          mismatchReason: '',
+          returnReason: '',
+          calibrationId: '',
+          operator: '周渝',
+          remark: 'JL2026-04 名额已满，排队等下一趟',
+          ...stamp(606),
+        },
+        {
+          id: 'dsp_ltx01_bb_q',
+          instrumentId: 'ins_ltx01_bb',
+          stationId: 'stn_ltx_01',
+          stationCode: 'LTX01',
+          serialNo: 'CMG-3E-20210418-01',
+          sendDate: today,
+          state: '排队中',
+          batchId: '',
+          queueOrder: 1,
+          mismatchReason: '',
+          returnReason: '',
+          calibrationId: '',
+          operator: '陈立群',
+          remark: '刚登记，排在队尾',
+          ...stamp(607),
+        },
+      ];
+
+      // 当前在途批次新产生的两条标定结论（与历史切批共用 calibrations 表）
+      const activeCalibrationRows: Calibration[] = [
+        {
+          id: 'cal_active_ltx03_bb',
+          instrumentId: 'ins_ltx03_bb',
+          date: daysAgo(1),
+          sensitivity: 2198.6,
+          selfNoise: 1.98,
+          responseVerdict: '合格',
+          operator: '林之遥',
+          agency: '省地震局计量站',
+          remark: 'JL2026-03 出车标定，脉冲响应合格',
+          ...stamp(610),
+        },
+        {
+          id: 'cal_active_ltx02_bb',
+          instrumentId: 'ins_ltx02_bb',
+          date: daysAgo(1),
+          sensitivity: 1012.3,
+          selfNoise: 2.95,
+          responseVerdict: '不合格',
+          operator: '林之遥',
+          agency: '省地震局计量站',
+          remark: 'JL2026-03 出车标定，灵敏度偏低',
+          ...stamp(611),
+        },
+      ];
+
       await db.arrays.bulkPut(arrayRows);
       await db.stations.bulkPut(stationRows);
       await db.instruments.bulkPut(instrumentRows);
-      await db.calibrations.bulkPut(calibrationRows);
+      await db.calibrations.bulkPut([...calibrationRows, ...activeCalibrationRows]);
       await db.replaces.bulkPut(replaces);
+      await db.batches.bulkPut([...legacy.batches, ...activeBatchRows]);
+      await db.dispatches.bulkPut([...legacy.dispatches, ...activeDispatchRows]);
     }
   );
 }
@@ -555,7 +884,7 @@ export async function initDatabase(): Promise<void> {
 export async function clearAllTables(): Promise<void> {
   await db.transaction(
     'rw',
-    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces],
+    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces, db.dispatches, db.batches],
     async () => {
       await Promise.all([
         db.arrays.clear(),
@@ -563,6 +892,8 @@ export async function clearAllTables(): Promise<void> {
         db.instruments.clear(),
         db.calibrations.clear(),
         db.replaces.clear(),
+        db.dispatches.clear(),
+        db.batches.clear(),
       ]);
     }
   );
@@ -572,18 +903,45 @@ export async function clearAllTables(): Promise<void> {
 export async function resetDatabase(): Promise<void> {
   await clearAllTables();
   await seedDemoData();
+  clearOrphanCalibrations();
 }
 
 /** 统计各表行数，供页脚概览与几何页展示 */
 export async function countAll(): Promise<Record<string, number>> {
-  const [arrays, stations, instruments, calibrations, replaces] = await Promise.all([
+  const [arrays, stations, instruments, calibrations, replaces, dispatches, batches] = await Promise.all([
     db.arrays.count(),
     db.stations.count(),
     db.instruments.count(),
     db.calibrations.count(),
     db.replaces.count(),
+    db.dispatches.count(),
+    db.batches.count(),
   ]);
-  return { arrays, stations, instruments, calibrations, replaces };
+  return { arrays, stations, instruments, calibrations, replaces, dispatches, batches };
+}
+
+/** 读取升级时切不出来的旧标定（单列待人工确认） */
+export function readOrphanCalibrations(): Array<{
+  calibration: Calibration;
+  reason: string;
+}> {
+  try {
+    const raw = localStorage.getItem(LS_KEYS.orphanCalibrations);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as Array<{ calibration: Calibration; reason: string }>;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 人工确认后清掉单列提示（原始标定记录保留在校准表中） */
+export function clearOrphanCalibrations(): void {
+  try {
+    localStorage.removeItem(LS_KEYS.orphanCalibrations);
+  } catch {
+    // 忽略
+  }
 }
 
 /** 写入结构版本号到 localStorage，便于几何页比对 */

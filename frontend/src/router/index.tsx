@@ -10,6 +10,8 @@ import App from '@/App';
 const ArrayList = lazy(() => import('@/pages/ArrayList'));
 const StationInstruments = lazy(() => import('@/pages/StationInstruments'));
 const CalibrationBoard = lazy(() => import('@/pages/CalibrationBoard'));
+const DispatchLedger = lazy(() => import('@/pages/DispatchLedger'));
+const BatchBoard = lazy(() => import('@/pages/BatchBoard'));
 const ReplaceBoard = lazy(() => import('@/pages/ReplaceBoard'));
 const GeometryView = lazy(() => import('@/pages/GeometryView'));
 
@@ -33,6 +35,8 @@ export const ROUTES = {
   arrays: '/arrays',
   stations: (arrayId: string): string => `/stations/${arrayId}/instruments`,
   calibrations: '/calibrations',
+  dispatches: '/dispatches',
+  batches: '/batches',
   replacements: '/replacements',
   geometry: '/geometry',
 } as const;
@@ -46,6 +50,8 @@ export const appRoutes: RouteObject[] = [
       { path: 'arrays', element: withSuspense(<ArrayList />) },
       { path: 'stations/:id/instruments', element: withSuspense(<StationInstruments />) },
       { path: 'calibrations', element: withSuspense(<CalibrationBoard />) },
+      { path: 'dispatches', element: withSuspense(<DispatchLedger />) },
+      { path: 'batches', element: withSuspense(<BatchBoard />) },
       { path: 'replacements', element: withSuspense(<ReplaceBoard />) },
       { path: 'geometry', element: withSuspense(<GeometryView />) },
       { path: '*', element: <Navigate to={ROUTES.arrays} replace /> },

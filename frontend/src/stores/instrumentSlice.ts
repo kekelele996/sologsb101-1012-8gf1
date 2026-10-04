@@ -77,15 +77,38 @@ export const updateInstrument = createAsyncThunk(
   }
 );
 
-/** 删除仪器：级联删除标定与更换记录 */
+/** 删除仪器：在途送检记录先拦下；历史/已入库记录随仪器删除，已出车批次台账仅摘条目 */
 export const removeInstrument = createAsyncThunk(
   'instrument/removeInstrument',
-  async (instrumentId: string) => {
-    await db.transaction('rw', [db.instruments, db.calibrations, db.replaces], async () => {
-      await db.calibrations.where('instrumentId').equals(instrumentId).delete();
-      await db.replaces.where('instrumentId').equals(instrumentId).delete();
-      await db.instruments.delete(instrumentId);
-    });
+  async (instrumentId: string, { rejectWithValue }) => {
+    const activeStates = ['排队中', '已排入', '已出车', '对账失败'] as const;
+    const busy = (await db.dispatches.where('instrumentId').equals(instrumentId).toArray()).find((row) =>
+      activeStates.includes(row.state as (typeof activeStates)[number])
+    );
+    if (busy) {
+      return rejectWithValue(`该仪器有一条「${busy.state}」的送检记录，请先撤回或等该趟闭环后再删除`);
+    }
+    await db.transaction(
+      'rw',
+      [db.instruments, db.calibrations, db.replaces, db.dispatches, db.batches],
+      async () => {
+        const dispatchIds = (
+          await db.dispatches.where('instrumentId').equals(instrumentId).toArray()
+        ).map((row) => row.id);
+        await db.calibrations.where('instrumentId').equals(instrumentId).delete();
+        await db.replaces.where('instrumentId').equals(instrumentId).delete();
+        await db.dispatches.where('instrumentId').equals(instrumentId).delete();
+        for (const batch of await db.batches.toArray()) {
+          if (batch.items.some((item) => dispatchIds.includes(item.dispatchId))) {
+            await db.batches.update(batch.id, {
+              items: batch.items.filter((item) => !dispatchIds.includes(item.dispatchId)),
+              updatedAt: Date.now(),
+            } as never);
+          }
+        }
+        await db.instruments.delete(instrumentId);
+      }
+    );
     return instrumentId;
   }
 );

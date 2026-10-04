@@ -7,9 +7,11 @@ import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Badge, Button, Layout, Menu, Space, Tag, Typography, message } from 'antd';
 import {
   AppstoreOutlined,
+  CarOutlined,
   DashboardOutlined,
   ExperimentOutlined,
   GlobalOutlined,
+  SolutionOutlined,
   SwapOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
@@ -30,6 +32,7 @@ import {
   selectReplaces,
   startCalibrationSubscription,
 } from '@/stores/calibrationSlice';
+import { selectBatches, selectDispatches, startLedgerSubscription } from '@/stores/ledgerSlice';
 import { DB_NAME, DB_VERSION, initDatabase } from '@/utils/db';
 
 const { Header, Sider, Content, Footer } = Layout;
@@ -37,6 +40,8 @@ const { Header, Sider, Content, Footer } = Layout;
 /** 按当前路径决定导航高亮项 */
 function buildSelectedKey(pathname: string, currentArrayId: string | null): string {
   if (pathname.startsWith('/calibrations')) return ROUTES.calibrations;
+  if (pathname.startsWith('/dispatches')) return ROUTES.dispatches;
+  if (pathname.startsWith('/batches')) return ROUTES.batches;
   if (pathname.startsWith('/replacements')) return ROUTES.replacements;
   if (pathname.startsWith('/geometry')) return ROUTES.geometry;
   if (pathname.startsWith('/stations/') && currentArrayId) return ROUTES.stations(currentArrayId);
@@ -54,6 +59,8 @@ export default function App() {
   const instruments = useAppSelector(selectInstruments);
   const calibrations = useAppSelector(selectCalibrations);
   const replaces = useAppSelector(selectReplaces);
+  const dispatches = useAppSelector(selectDispatches);
+  const batches = useAppSelector(selectBatches);
   const currentArrayId = useAppSelector(selectCurrentArrayId);
   const ready = useAppSelector((state) => state.array.ready);
 
@@ -67,6 +74,7 @@ export default function App() {
         startArraySubscription(dispatch);
         startInstrumentSubscription(dispatch);
         startCalibrationSubscription(dispatch);
+        startLedgerSubscription(dispatch);
       } catch (error) {
         if (cancelled) return;
         messageApi.error(
@@ -83,6 +91,8 @@ export default function App() {
   const selectedKey = buildSelectedKey(location.pathname, currentArrayId);
   const unqualified = calibrations.filter((row) => row.responseVerdict === '不合格').length;
   const pendingReplaces = replaces.filter((row) => row.state !== '已复核').length;
+  const waitingDispatches = dispatches.filter((row) => row.state === '排队中').length;
+  const failedDispatches = dispatches.filter((row) => row.state === '对账失败').length;
 
   return (
     <>
@@ -117,6 +127,8 @@ export default function App() {
                 disabled: !currentArrayId,
               },
               { key: ROUTES.calibrations, icon: <DashboardOutlined />, label: '标定记录台' },
+              { key: ROUTES.dispatches, icon: <SolutionOutlined />, label: '运维班送检台账' },
+              { key: ROUTES.batches, icon: <CarOutlined />, label: '计量站出车批次' },
               { key: ROUTES.replacements, icon: <SwapOutlined />, label: '合格评定与更换' },
               { key: ROUTES.geometry, icon: <GlobalOutlined />, label: '台阵几何与备份' },
             ]}
@@ -131,6 +143,13 @@ export default function App() {
               </span>
               <span>
                 <ThunderboltOutlined /> 标定 {calibrations.length} · 不合格 {unqualified}
+              </span>
+              <span>
+                <SolutionOutlined /> 送检 {dispatches.length} · 排队 {waitingDispatches}
+                {failedDispatches > 0 ? ' · 挂起 ' + failedDispatches : ''}
+              </span>
+              <span>
+                <CarOutlined /> 批次 {batches.length}
               </span>
               <span>
                 <SwapOutlined /> 更换未闭环 {pendingReplaces}
@@ -170,7 +189,8 @@ export default function App() {
             </Space>
             <Space>
               <Badge count={calibrations.length} showZero color="#3f7bbf" title="标定记录总数" />
-              <Badge count={unqualified} showZero color="#c0392b" title="不合格标定" />
+              <Badge count={waitingDispatches} showZero color="#d68910" title="排队等下一趟" />
+              <Badge count={failedDispatches} showZero color="#c0392b" title="对账失败挂起" />
               <Badge count={pendingReplaces} showZero color="#d68910" title="未闭环更换" />
               {currentArrayId ? (
                 <Button size="small" onClick={() => navigate(ROUTES.stations(currentArrayId))}>

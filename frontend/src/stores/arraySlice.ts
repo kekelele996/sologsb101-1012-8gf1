@@ -60,11 +60,19 @@ export const updateArray = createAsyncThunk(
   }
 );
 
-/** 删除台阵：级联删除台站、仪器、标定与更换记录 */
+/** 删除台阵：级联删除台站、仪器、标定、更换与送检登记（历史出车批次保留） */
 export const removeArray = createAsyncThunk('array/removeArray', async (arrayId: string) => {
   await db.transaction(
     'rw',
-    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces],
+    [
+      db.arrays,
+      db.stations,
+      db.instruments,
+      db.calibrations,
+      db.replaces,
+      db.dispatches,
+      db.batches,
+    ],
     async () => {
       const stationIds = (await db.stations.where('arrayId').equals(arrayId).toArray()).map(
         (row) => row.id
@@ -74,8 +82,26 @@ export const removeArray = createAsyncThunk('array/removeArray', async (arrayId:
           await db.instruments.where('stationId').anyOf(stationIds).toArray()
         ).map((row) => row.id);
         if (instrumentIds.length > 0) {
+          const dispatchIds = (
+            await db.dispatches.where('instrumentId').anyOf(instrumentIds).toArray()
+          ).map((row) => row.id);
           await db.calibrations.where('instrumentId').anyOf(instrumentIds).delete();
           await db.replaces.where('instrumentId').anyOf(instrumentIds).delete();
+          await db.dispatches.where('instrumentId').anyOf(instrumentIds).delete();
+          // 历史/已出车批次台账保留，仅摘掉被删仪器的逐台记录
+          const touchedBatches = new Set(
+            (await db.batches.toArray())
+              .filter((batch) => batch.items.some((item) => dispatchIds.includes(item.dispatchId)))
+              .map((batch) => batch.id)
+          );
+          for (const batchId of touchedBatches) {
+            const batch = await db.batches.get(batchId);
+            if (!batch) continue;
+            await db.batches.update(batchId, {
+              items: batch.items.filter((item) => !dispatchIds.includes(item.dispatchId)),
+              updatedAt: Date.now(),
+            } as never);
+          }
           await db.instruments.bulkDelete(instrumentIds);
         }
         await db.stations.bulkDelete(stationIds);
@@ -104,19 +130,34 @@ export const updateStation = createAsyncThunk(
   }
 );
 
-/** 删除台站：级联删除仪器、标定与更换记录 */
+/** 删除台站：级联删除仪器、标定、更换与送检登记（已出车批次保留台账，仅摘条目） */
 export const removeStation = createAsyncThunk('array/removeStation', async (stationId: string) => {
-  await db.transaction('rw', [db.stations, db.instruments, db.calibrations, db.replaces], async () => {
-    const instrumentIds = (
-      await db.instruments.where('stationId').equals(stationId).toArray()
-    ).map((row) => row.id);
-    if (instrumentIds.length > 0) {
-      await db.calibrations.where('instrumentId').anyOf(instrumentIds).delete();
-      await db.replaces.where('instrumentId').anyOf(instrumentIds).delete();
-      await db.instruments.bulkDelete(instrumentIds);
+  await db.transaction(
+    'rw',
+    [db.stations, db.instruments, db.calibrations, db.replaces, db.dispatches, db.batches],
+    async () => {
+      const instruments = await db.instruments.where('stationId').equals(stationId).toArray();
+      const instrumentIds = instruments.map((row) => row.id);
+      if (instrumentIds.length > 0) {
+        const dispatchIds = (
+          await db.dispatches.where('instrumentId').anyOf(instrumentIds).toArray()
+        ).map((row) => row.id);
+        await db.calibrations.where('instrumentId').anyOf(instrumentIds).delete();
+        await db.replaces.where('instrumentId').anyOf(instrumentIds).delete();
+        await db.dispatches.where('instrumentId').anyOf(instrumentIds).delete();
+        for (const batch of await db.batches.toArray()) {
+          if (batch.items.some((item) => dispatchIds.includes(item.dispatchId))) {
+            await db.batches.update(batch.id, {
+              items: batch.items.filter((item) => !dispatchIds.includes(item.dispatchId)),
+              updatedAt: Date.now(),
+            } as never);
+          }
+        }
+        await db.instruments.bulkDelete(instrumentIds);
+      }
+      await db.stations.delete(stationId);
     }
-    await db.stations.delete(stationId);
-  });
+  );
   return stationId;
 });
 

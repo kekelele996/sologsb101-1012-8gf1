@@ -13,21 +13,33 @@ import {
 } from '@/utils/db';
 import type { ResponseVerdict } from '@/types/calibration';
 import { apertureKm, centroid, haversineKm, round, stationDistances } from '@/utils/geo';
+import type { Dispatch } from '@/types/dispatch';
+import type { CalibBatch } from '@/types/batch';
 
 /** 备份集合键名 */
-export const BACKUP_KEYS = ['arrays', 'stations', 'instruments', 'calibrations', 'replaces'] as const;
+export const BACKUP_KEYS = [
+  'arrays',
+  'stations',
+  'instruments',
+  'calibrations',
+  'replaces',
+  'dispatches',
+  'batches',
+] as const;
 export type BackupKey = (typeof BACKUP_KEYS)[number];
 
 export type CountMap = Record<BackupKey, number>;
 
 /** 组装当前本地数据的完整快照 */
 export async function buildBackupPayload(): Promise<BackupPayload> {
-  const [arrays, stations, instruments, calibrations, replaces] = await Promise.all([
+  const [arrays, stations, instruments, calibrations, replaces, dispatches, batches] = await Promise.all([
     db.arrays.toArray(),
     db.stations.toArray(),
     db.instruments.toArray(),
     db.calibrations.toArray(),
     db.replaces.toArray(),
+    db.dispatches.toArray(),
+    db.batches.toArray(),
   ]);
   return {
     app: 'gbseisarray',
@@ -38,6 +50,8 @@ export async function buildBackupPayload(): Promise<BackupPayload> {
     instruments,
     calibrations,
     replaces,
+    dispatches,
+    batches,
   };
 }
 
@@ -68,6 +82,8 @@ export function validateBackup(input: unknown): {
     instruments: obj.instruments ?? [],
     calibrations: obj.calibrations ?? [],
     replaces: obj.replaces ?? [],
+    dispatches: obj.dispatches ?? [],
+    batches: obj.batches ?? [],
   };
   return { ok: true, errors, payload };
 }
@@ -80,6 +96,8 @@ export function countPayload(payload: BackupPayload): CountMap {
     instruments: payload.instruments.length,
     calibrations: payload.calibrations.length,
     replaces: payload.replaces.length,
+    dispatches: payload.dispatches.length,
+    batches: payload.batches.length,
   };
 }
 
@@ -117,13 +135,23 @@ export async function importBackup(payload: BackupPayload, overwrite: boolean): 
   if (overwrite) await clearAllTables();
   await db.transaction(
     'rw',
-    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces],
+    [
+      db.arrays,
+      db.stations,
+      db.instruments,
+      db.calibrations,
+      db.replaces,
+      db.dispatches,
+      db.batches,
+    ],
     async () => {
       await db.arrays.bulkPut(payload.arrays);
       await db.stations.bulkPut(payload.stations);
       await db.instruments.bulkPut(payload.instruments);
       await db.calibrations.bulkPut(payload.calibrations);
       await db.replaces.bulkPut(payload.replaces);
+      await db.batches.bulkPut(payload.batches);
+      await db.dispatches.bulkPut(payload.dispatches);
     }
   );
   return countPayload(payload);
@@ -134,6 +162,8 @@ export function remapIds(payload: BackupPayload): BackupPayload {
   const arrayMap = new Map<string, string>();
   const stationMap = new Map<string, string>();
   const instrumentMap = new Map<string, string>();
+  const calibrationMap = new Map<string, string>();
+  const batchMap = new Map<string, string>();
 
   const arrays = payload.arrays.map((row) => {
     const id = createId('arr');
@@ -150,17 +180,53 @@ export function remapIds(payload: BackupPayload): BackupPayload {
     instrumentMap.set(row.id, id);
     return { ...row, id, stationId: stationMap.get(row.stationId) ?? row.stationId };
   });
-  const calibrations = payload.calibrations.map((row) => ({
-    ...row,
-    id: createId('cal'),
-    instrumentId: instrumentMap.get(row.instrumentId) ?? row.instrumentId,
-  }));
+  const calibrations = payload.calibrations.map((row) => {
+    const id = createId('cal');
+    calibrationMap.set(row.id, id);
+    return {
+      ...row,
+      id,
+      instrumentId: instrumentMap.get(row.instrumentId) ?? row.instrumentId,
+    };
+  });
   const replaces = payload.replaces.map((row) => ({
     ...row,
     id: createId('rpl'),
     instrumentId: instrumentMap.get(row.instrumentId) ?? row.instrumentId,
   }));
-  return { ...payload, arrays, stations, instruments, calibrations, replaces };
+  const batches: CalibBatch[] = payload.batches.map((row) => {
+    const id = createId('bt');
+    batchMap.set(row.id, id);
+    return {
+      ...row,
+      id,
+      items: row.items.map((item) => ({
+        ...item,
+        instrumentId: instrumentMap.get(item.instrumentId) ?? item.instrumentId,
+      })),
+    };
+  });
+  const dispatches: Dispatch[] = payload.dispatches.map((row) => ({
+    ...row,
+    id: createId('dsp'),
+    stationId: stationMap.get(row.stationId) ?? row.stationId,
+    instrumentId: instrumentMap.get(row.instrumentId) ?? row.instrumentId,
+    batchId: row.batchId ? (batchMap.get(row.batchId) ?? row.batchId) : '',
+    calibrationId: row.calibrationId ? (calibrationMap.get(row.calibrationId) ?? row.calibrationId) : '',
+  }));
+  // 批次逐台记录的 dispatchId 与新送检登记对齐
+  const dispatchIdMap = new Map<string, string>();
+  payload.dispatches.forEach((row, index) => {
+    dispatchIdMap.set(row.id, dispatches[index].id);
+  });
+  batches.forEach((batch, batchIndex) => {
+    batch.items = batch.items.map((item) => ({
+      ...item,
+      dispatchId: dispatchIdMap.get(item.dispatchId) ?? item.dispatchId,
+    }));
+    batches[batchIndex] = batch;
+  });
+  return { ...payload, arrays, stations, instruments, calibrations, replaces, dispatches, batches };
 }
 
 /** 按台阵汇总的几何与标定结论 */
